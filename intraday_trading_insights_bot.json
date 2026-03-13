@@ -1,0 +1,435 @@
+{
+  "name": "Intraday Trading Insights Bot",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "1",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        -920,
+        180
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {
+              "name": "ticker",
+              "value": "={{ ($json.message.text || '').toUpperCase().replace(/[^A-Z.]/g, '').trim() || 'AAPL' }}"
+            }
+          ],
+          "number": [
+            {
+              "name": "chatId",
+              "value": "={{ $json.message.chat.id }}"
+            }
+          ]
+        }
+      },
+      "id": "2",
+      "name": "Extract Ticker",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2,
+      "position": [
+        -700,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.twelvedata.com/time_series",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "symbol",
+              "value": "={{ $json.ticker }}"
+            },
+            {
+              "name": "interval",
+              "value": "15min"
+            },
+            {
+              "name": "outputsize",
+              "value": "20"
+            },
+            {
+              "name": "format",
+              "value": "JSON"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "3",
+      "name": "Get OHLC (TwelveData)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        80
+      ],
+      "continueOnFail": true,
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "2",
+          "name": "TwelveData Query Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://newsapi.org/v2/everything",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.ticker }}"
+            },
+            {
+              "name": "language",
+              "value": "en"
+            },
+            {
+              "name": "pageSize",
+              "value": "5"
+            },
+            {
+              "name": "sortBy",
+              "value": "publishedAt"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4",
+      "name": "Get News (NewsAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -460,
+        280
+      ],
+      "continueOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "3",
+          "name": "NewsAPI Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status || '' }}",
+              "operation": "notEqual",
+              "value2": "error"
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "id": "5",
+      "name": "TwelveData OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status || '' }}",
+              "operation": "notEqual",
+              "value2": "error"
+            }
+          ]
+        },
+        "combineOperation": "all"
+      },
+      "id": "6",
+      "name": "NewsAPI OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Extract Ticker').first().json.chatId }}",
+        "text": "=⚠️ Could not retrieve data for {{ $('Extract Ticker').first().json.ticker }}. Please try again.",
+        "additionalFields": {}
+      },
+      "id": "7",
+      "name": "Send Fallback Message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        20,
+        420
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine"
+      },
+      "id": "8",
+      "name": "Merge Market + News",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        20,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const market = $json;\nconst news = $input.item.json;\nconst ticker = $('Extract Ticker').first().json.ticker;\nconst candles = (market.values || []).slice(0, 20).map(c => ({ datetime: c.datetime, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }));\nconst headlines = (news.articles || []).slice(0, 5).map(a => ({ title: a.title, source: a.source?.name, publishedAt: a.publishedAt }));\nconst systemPrompt = `You are an institutional intraday trading analyst. Analyze both OHLC candlestick data and recent news sentiment for ${ticker}. Identify candlestick patterns if present (doji, hammer, engulfing, shooting star, etc.) and derive a directional intraday bias. Respond ONLY in this exact format and nothing else:\nDecision: BUY|SELL|HOLD\nConfidence: <0-100>%\nReasoning: <brief explanation>`;\nconst userPrompt = `Ticker: ${ticker}\\nCandles (latest first): ${JSON.stringify(candles)}\\nNews headlines: ${JSON.stringify(headlines)}`;\nreturn [{ json: { ticker, chatId: $('Extract Ticker').first().json.chatId, systemPrompt, userPrompt, candles, headlines } }];"
+      },
+      "id": "9",
+      "name": "Build Analysis Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "={{ $credentials.apiKey }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"contents\": [\n    {\n      \"role\": \"user\",\n      \"parts\": [\n        {\n          \"text\": $json.systemPrompt + \"\\n\\n\" + $json.userPrompt\n        }\n      ]\n    }\n  ],\n  \"generationConfig\": {\n    \"temperature\": 0.2,\n    \"maxOutputTokens\": 300\n  }\n}",
+        "options": {}
+      },
+      "id": "10",
+      "name": "Gemini Analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        500,
+        180
+      ],
+      "continueOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "4",
+          "name": "Gemini API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const ticker = $('Build Analysis Context').first().json.ticker;\nconst chatId = $('Build Analysis Context').first().json.chatId;\nlet output = '';\nif ($json.candidates?.[0]?.content?.parts?.[0]?.text) {\n  output = $json.candidates[0].content.parts[0].text.trim();\n} else {\n  output = `Decision: HOLD\\nConfidence: 0%\\nReasoning: Model response unavailable for ${ticker}.`;\n}\nreturn [{ json: { chatId, text: `📈 Intraday Trading Insights — ${ticker}\\n\\n${output}` } }];"
+      },
+      "id": "11",
+      "name": "Format Telegram Reply",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        740,
+        180
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.text }}",
+        "additionalFields": {}
+      },
+      "id": "12",
+      "name": "Send Recommendation",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        980,
+        180
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "1",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Extract Ticker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Ticker": {
+      "main": [
+        [
+          {
+            "node": "Get OHLC (TwelveData)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get News (NewsAPI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get OHLC (TwelveData)": {
+      "main": [
+        [
+          {
+            "node": "TwelveData OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get News (NewsAPI)": {
+      "main": [
+        [
+          {
+            "node": "NewsAPI OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TwelveData OK?": {
+      "main": [
+        [
+          {
+            "node": "Merge Market + News",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Fallback Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "NewsAPI OK?": {
+      "main": [
+        [
+          {
+            "node": "Merge Market + News",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Send Fallback Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Market + News": {
+      "main": [
+        [
+          {
+            "node": "Build Analysis Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Analysis Context": {
+      "main": [
+        [
+          {
+            "node": "Gemini Analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Analysis": {
+      "main": [
+        [
+          {
+            "node": "Format Telegram Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Telegram Reply": {
+      "main": [
+        [
+          {
+            "node": "Send Recommendation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "pinData": {},
+  "versionId": "1"
+}
